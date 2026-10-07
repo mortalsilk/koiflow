@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=KoiFlow
+Comment=A calm PDF reader with semantic reflow
+Exec=koiflow %F
+Icon=koiflow
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+StartupNotify=true
+
