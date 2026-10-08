@@ -16,7 +16,12 @@ impl VisualLine {
 
 /// Geometry-aware reconstruction used by the production reflow path.
 pub fn blocks_from_raw_page(page: &RawPage, first_id: u64) -> Vec<Block> {
-    let mut glyphs: Vec<_> = page.glyphs.iter().filter(|glyph| !glyph.ch.is_control()).cloned().collect();
+    let mut glyphs: Vec<_> = page.glyphs.iter().filter(|glyph| {
+        !glyph.ch.is_control()
+            && glyph.font_size.is_finite()
+            && glyph.font_size > 0.0
+            && [glyph.bounds.left, glyph.bounds.right, glyph.bounds.top, glyph.bounds.bottom].into_iter().all(f32::is_finite)
+    }).cloned().collect();
     glyphs.sort_by(|a, b| b.bounds.top.total_cmp(&a.bounds.top).then(a.bounds.left.total_cmp(&b.bounds.left)));
     let mut lines: Vec<VisualLine> = Vec::new();
     for glyph in glyphs {
@@ -138,8 +143,8 @@ pub fn blocks_from_page_text(page: u32, text: &str, first_id: u64) -> Vec<Block>
             content: content.to_owned(),
             source: vec![SourceRange {
                 page,
-                start_char: start as u32,
-                end_char: end as u32,
+                start_char: bounded_char_index(start),
+                end_char: bounded_char_index(end),
             }],
             confidence: 0.82,
         });
@@ -150,7 +155,7 @@ pub fn blocks_from_page_text(page: u32, text: &str, first_id: u64) -> Vec<Block>
         let trimmed = line.trim();
         if trimmed.is_empty() {
             flush(&mut blocks, &mut paragraph, start, cursor);
-            cursor += line.len() + 1;
+            cursor = cursor.saturating_add(line.chars().count()).saturating_add(1);
             start = cursor;
             continue;
         }
@@ -165,12 +170,16 @@ pub fn blocks_from_page_text(page: u32, text: &str, first_id: u64) -> Vec<Block>
         paragraph.push_str(trimmed);
 
         if ends_sentence(trimmed) || looks_like_heading(trimmed) {
-            flush(&mut blocks, &mut paragraph, start, cursor + line.len());
+            flush(&mut blocks, &mut paragraph, start, cursor.saturating_add(line.chars().count()));
         }
-        cursor += line.len() + 1;
+        cursor = cursor.saturating_add(line.chars().count()).saturating_add(1);
     }
-    flush(&mut blocks, &mut paragraph, start, normalized.len());
+    flush(&mut blocks, &mut paragraph, start, normalized.chars().count());
     blocks
+}
+
+fn bounded_char_index(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 fn classify(text: &str) -> BlockKind {
@@ -269,5 +278,64 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].content, text);
+    }
+
+    #[test]
+    fn empty_and_control_only_pages_produce_no_blocks() {
+        let page = RawPage {
+            page: 9,
+            width: 612.0,
+            height: 792.0,
+            glyphs: vec![RawGlyph {
+                source: SourcePosition { page: 9, char_index: 0 },
+                ch: '\0',
+                bounds: PageRect::default(),
+                font_name: String::new(),
+                font_size: 0.0,
+            }],
+            text: String::new(),
+            links: vec![],
+        };
+        assert!(blocks_from_raw_page(&page, 1).is_empty());
+        assert!(blocks_from_page_text(9, "\n\r\n", 1).is_empty());
+    }
+
+    #[test]
+    fn fallback_ranges_count_unicode_characters_not_utf8_bytes() {
+        let text = "Résumé naïve façade — emoji 😀 concludes this sentence.";
+        let blocks = blocks_from_page_text(3, text, 8);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, text);
+        assert_eq!(blocks[0].source[0].start_char, 0);
+        assert_eq!(blocks[0].source[0].end_char, text.chars().count() as u32);
+        assert!(text.len() > text.chars().count());
+    }
+
+    #[test]
+    fn malformed_glyph_metrics_are_ignored_without_poisoning_layout() {
+        let glyph = |index, ch, left, font_size| RawGlyph {
+            source: SourcePosition { page: 4, char_index: index },
+            ch,
+            bounds: PageRect { left, right: left + 6.0, top: 100.0, bottom: 88.0 },
+            font_name: "Embedded".into(),
+            font_size,
+        };
+        let page = RawPage {
+            page: 4,
+            width: 600.0,
+            height: 800.0,
+            glyphs: vec![
+                glyph(0, 'O', 10.0, 12.0),
+                glyph(1, 'X', f32::NAN, 12.0),
+                glyph(2, 'K', 20.0, 12.0),
+                glyph(3, 'Y', 30.0, f32::INFINITY),
+            ],
+            text: "OXKY".into(),
+            links: vec![],
+        };
+        let blocks = blocks_from_raw_page(&page, 1);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "OK");
+        assert_eq!((blocks[0].source[0].start_char, blocks[0].source[0].end_char), (0, 3));
     }
 }

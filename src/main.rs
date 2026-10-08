@@ -8,16 +8,15 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("KoiFlow")
+            .with_title("koiflow")
             .with_inner_size([1240.0, 820.0])
             .with_min_inner_size([720.0, 520.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "KoiFlow",
+        "koiflow",
         options,
         Box::new(|cc| Ok(Box::new(KoiFlowApp::new(cc)))),
     )
 }
-

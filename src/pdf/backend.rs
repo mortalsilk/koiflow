@@ -1,11 +1,16 @@
-use std::{path::{Path, PathBuf}, sync::OnceLock};
+use std::{
+    fs::File,
+    io::{self, Read},
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use directories::ProjectDirs;
 use pdfium_render::prelude::*;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::document::{DocumentMetadata, LinkTarget, OutlineItem, PageLink, PageRect, RawGlyph, RawPage, SourcePosition};
+use crate::document::{DocumentCapabilities, DocumentFormat, DocumentMetadata, LinkTarget, OpenedDocument, OutlineItem, PageLink, PageRect, RawGlyph, RawPage, SourcePosition};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const BUNDLED_PDFIUM: &[u8] = include_bytes!(concat!(
@@ -30,15 +35,7 @@ pub enum PdfError {
     Page(u32),
 }
 
-#[derive(Debug, Clone)]
-pub struct OpenedPdf {
-    pub path: PathBuf,
-    pub document_id: String,
-    pub title: String,
-    pub page_count: u32,
-    pub metadata: DocumentMetadata,
-    pub outline: Vec<OutlineItem>,
-}
+pub type OpenedPdf = OpenedDocument;
 
 #[derive(Debug)]
 pub struct PageData {
@@ -80,15 +77,15 @@ fn bundled_pdfium_path() -> Result<PathBuf, PdfError> {
         .unwrap_or_else(std::env::temp_dir);
     let runtime_dir = data_dir.join("runtime").join(BUNDLED_PDFIUM_VERSION);
     let library_path = runtime_dir.join("libpdfium.so");
-    let expected_digest = Sha256::digest(BUNDLED_PDFIUM);
-    let installed_is_valid = std::fs::read(&library_path)
-        .map(|bytes| Sha256::digest(bytes) == expected_digest)
+    let expected_digest: [u8; 32] = Sha256::digest(BUNDLED_PDFIUM).into();
+    let installed_is_valid = sha256_file(&library_path)
+        .map(|digest| digest == expected_digest)
         .unwrap_or(false);
 
     if !installed_is_valid {
         std::fs::create_dir_all(&runtime_dir)
             .map_err(|error| PdfError::Runtime(error.to_string()))?;
-        let temporary_path = runtime_dir.join("libpdfium.so.part");
+        let temporary_path = runtime_dir.join(format!("libpdfium.so.{}.part", std::process::id()));
         std::fs::write(&temporary_path, BUNDLED_PDFIUM)
             .map_err(|error| PdfError::Runtime(error.to_string()))?;
         std::fs::rename(&temporary_path, &library_path)
@@ -111,6 +108,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn file_identity_is_streamed_and_errors_are_preserved() {
+        let path = std::env::temp_dir().join(format!("koiflow-hash-{}.bin", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let digest = sha256_file(&path).unwrap();
+        assert_eq!(hex_digest(digest), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(sha256_file(&path).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn bundled_runtime_loads_and_renders_without_system_pdfium() {
         let backend = PdfiumBackend::new()
@@ -124,7 +131,32 @@ mod tests {
             assert!(metadata.page_count > 0);
             let page = backend.load_page(fixture, None, 0, 640, 0, true).expect("fixture should render");
             assert!(page.width > 0 && page.height > 0 && !page.rgba.is_empty());
+            assert_eq!(page.width.checked_mul(page.height).and_then(|pixels| pixels.checked_mul(4)), Some(page.rgba.len()));
+            assert_eq!(page.raw.page, 0);
+            assert!(page.raw.width.is_finite() && page.raw.width > 0.0);
+            assert!(page.raw.height.is_finite() && page.raw.height > 0.0);
+            assert!(page.raw.glyphs.iter().all(|glyph| glyph.source.page == 0));
+            assert!(page.raw.glyphs.windows(2).all(|pair| pair[0].source.char_index <= pair[1].source.char_index));
+
+            let extraction = backend.load_page(fixture, None, 0, 0, 0, false).expect("text-only page load should work");
+            assert_eq!((extraction.width, extraction.height), (0, 0));
+            assert!(extraction.rgba.is_empty());
+            assert!(extraction.raw.width > 0.0 && extraction.raw.height > 0.0);
+            assert_eq!(extraction.raw.text, page.raw.text);
+            assert_eq!(extraction.raw.glyphs.len(), page.raw.glyphs.len());
+
+            let rotated = backend.load_page(fixture, None, 0, 640, 90, true).expect("rotated page should render");
+            assert!(rotated.width > 0 && rotated.height > 0 && !rotated.rgba.is_empty());
+            assert_eq!(rotated.width.checked_mul(rotated.height).and_then(|pixels| pixels.checked_mul(4)), Some(rotated.rgba.len()));
+            assert_ne!((page.width, page.height), (rotated.width, rotated.height));
+            let normalized = backend.load_page(fixture, None, 0, 640, 450, true).expect("rotation should normalize modulo 360");
+            assert_eq!((normalized.width, normalized.height), (rotated.width, rotated.height));
+            assert_eq!(normalized.rgba.len(), rotated.rgba.len());
+
+            assert!(matches!(backend.load_page(fixture, None, metadata.page_count, 640, 0, true), Err(PdfError::Page(_))));
         }
+        let missing = std::env::temp_dir().join("koiflow-definitely-missing-document.pdf");
+        assert!(matches!(backend.inspect(&missing, None), Err(PdfError::Open(_))));
     }
 }
 
@@ -146,9 +178,8 @@ impl PdfBackend for PdfiumBackend {
         if let Some(root) = document.bookmarks().root() {
             collect_outline(root, 0, &mut outline);
         }
-        let bytes = std::fs::read(path).map_err(|error| PdfError::Open(error.to_string()))?;
-        let document_id = format!("{:x}", Sha256::digest(bytes));
-        Ok(OpenedPdf { path: path.to_owned(), document_id, title, page_count: document.pages().len() as u32, metadata, outline })
+        let document_id = hex_digest(sha256_file(path).map_err(|error| PdfError::Open(error.to_string()))?);
+        Ok(OpenedPdf { path: path.to_owned(), document_id, title, page_count: document.pages().len() as u32, metadata, outline, format: DocumentFormat::Pdf, capabilities: DocumentCapabilities::for_format(DocumentFormat::Pdf) })
     }
 
     fn load_page(&self, path: &Path, password: Option<&str>, page: u32, target_width: i32, rotation: u16, render: bool) -> Result<PageData, PdfError> {
@@ -194,6 +225,24 @@ impl PdfBackend for PdfiumBackend {
             raw: RawPage { page, width: pdf_page.width().value, height: pdf_page.height().value, glyphs, text, links },
         })
     }
+}
+
+fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn map_open_error(error: PdfiumError) -> PdfError {

@@ -2,7 +2,7 @@
 name = "koiflow"
 version = "0.1.0"
 edition = "2024"
-description = "A calm, high-performance PDF reader with semantic text reflow"
+description = "A calm, high-performance document reader with semantic text reflow"
 license = "MIT"
 
 [lib]
@@ -10,8 +10,11 @@ doctest = false
 
 [dependencies]
 directories = "6.0"
+dejavu = "2.37"
+ebook-rs = { version = "0.16.6", default-features = false }
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+egui_extras = { version = "0.36", features = ["svg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 pdfium-render = "0.9"
 rfd = "0.17"
 rusqlite = { version = "0.38", features = ["bundled"] }

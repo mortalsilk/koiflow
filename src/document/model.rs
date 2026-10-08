@@ -1,8 +1,72 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub type DocumentId = String;
 pub type DocumentKey = String;
 pub type BlockId = u64;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocumentFormat {
+    #[default]
+    Pdf,
+    Epub,
+    Mobi,
+    Azw3,
+}
+
+impl DocumentFormat {
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "pdf" => Some(Self::Pdf),
+            "epub" => Some(Self::Epub),
+            "mobi" => Some(Self::Mobi),
+            "azw3" => Some(Self::Azw3),
+            _ => None,
+        }
+    }
+
+    pub fn is_ebook(self) -> bool { self != Self::Pdf }
+    pub fn as_str(self) -> &'static str { match self { Self::Pdf => "pdf", Self::Epub => "epub", Self::Mobi => "mobi", Self::Azw3 => "azw3" } }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DocumentCapabilities {
+    pub original_pages: bool,
+    pub reflow: bool,
+    pub rotation: bool,
+    pub zoom: bool,
+}
+
+impl DocumentCapabilities {
+    pub fn for_format(format: DocumentFormat) -> Self {
+        Self { original_pages: format == DocumentFormat::Pdf, reflow: true, rotation: format == DocumentFormat::Pdf, zoom: format == DocumentFormat::Pdf }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenedDocument {
+    pub path: PathBuf,
+    pub document_id: DocumentId,
+    pub title: String,
+    pub page_count: u32,
+    pub metadata: DocumentMetadata,
+    pub outline: Vec<OutlineItem>,
+    pub format: DocumentFormat,
+    pub capabilities: DocumentCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum TypedSourcePosition {
+    Pdf { page: u32, char_index: u32 },
+    Ebook { section: u32, text_offset: u32 },
+}
+
+impl TypedSourcePosition {
+    pub fn logical_index(self) -> u32 { match self { Self::Pdf { page, .. } => page, Self::Ebook { section, .. } => section } }
+    pub fn text_offset(self) -> u32 { match self { Self::Pdf { char_index, .. } => char_index, Self::Ebook { text_offset, .. } => text_offset } }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Document {
@@ -12,6 +76,8 @@ pub struct Document {
     pub blocks: Vec<Block>,
     pub outline: Vec<OutlineItem>,
     pub metadata: DocumentMetadata,
+    #[serde(default)]
+    pub format: DocumentFormat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +94,8 @@ pub enum BlockKind {
     Heading { level: u8 },
     Paragraph,
     ListItem,
+    Quote,
+    Code,
     Figure,
     Unknown,
 }

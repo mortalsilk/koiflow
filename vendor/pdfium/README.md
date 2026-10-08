@@ -1,6 +1,6 @@
 # Bundled PDFium runtime
 
-KoiFlow embeds the Linux x86-64 PDFium runtime so end users do not need to install system packages.
+koiflow embeds the Linux x86-64 PDFium runtime so end users do not need to install system packages.
 
 - Source: `bblanchon/pdfium-binaries`
 - Release: `chromium/8086` (`157.0.8086.0`)

@@ -1,11 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=KoiFlow
-Comment=A calm PDF reader with semantic reflow
+Name=koiflow
+Comment=A calm PDF and ebook reader with semantic reflow
 Exec=koiflow %F
 Icon=koiflow
 Terminal=false
 Categories=Office;Viewer;
-MimeType=application/pdf;
+MimeType=application/pdf;application/epub+zip;application/x-mobipocket-ebook;
 StartupNotify=true
-
